@@ -1,0 +1,18 @@
+{
+  "name": "감귤 생육조사",
+  "short_name": "감귤조사",
+  "description": "스마트폰 현장 입력용 감귤 생육조사 PWA",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f1e6",
+  "theme_color": "#d95f18",
+  "lang": "ko-KR",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
