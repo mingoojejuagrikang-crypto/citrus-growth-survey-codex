@@ -4,6 +4,7 @@ import './index.css'
 import {
   buildComparableKey,
   buildSubjectKey,
+  buildValidation,
   createDefaultSetupState,
   createDraftFromSetup,
   createMeasurementValue,
@@ -163,6 +164,16 @@ function App() {
     () => records.find((record) => record.subjectKey === currentSubjectKey),
     [currentSubjectKey, records],
   )
+  const previewRecord = useMemo(
+    () =>
+      createRecordFromDraft({
+        setup,
+        draft,
+        sessionId: session?.id ?? 'preview',
+        existingRecord: currentRecord,
+      }),
+    [currentRecord, draft, session?.id, setup],
+  )
 
   const previousRecord = useMemo(() => {
     return records.find(
@@ -174,6 +185,10 @@ function App() {
   }, [currentComparableKey, currentSubjectKey, draft.surveyDate, records])
 
   const unsyncedCount = records.filter((record) => record.sync.state !== 'synced').length
+  const queuedCount = records.filter((record) => record.sync.state === 'queued').length
+  const localOnlyCount = records.filter((record) => record.sync.state === 'local-only').length
+  const errorCount = records.filter((record) => record.sync.state === 'error').length
+  const validationPreview = useMemo(() => buildValidation(draft, setup), [draft, setup])
 
   function speak(text: string) {
     if (!supportsSpeechSynthesis) {
@@ -191,6 +206,8 @@ function App() {
       .trim()
       .replace(/,/g, '.')
       .replace(/\s*점\s*/g, '.')
+      .replace(/마이너스/g, '-')
+      .replace(/플러스/g, '+')
       .replace(/\s+/g, '')
   }
 
@@ -202,6 +219,11 @@ function App() {
       ['조사나무', 'treeNo'] as const,
       ['과실', 'fruitNo'] as const,
       ['조사과실', 'fruitNo'] as const,
+      ['횡', 'widthMm'] as const,
+      ['종', 'lengthMm'] as const,
+      ['과피두께', 'peelThicknessX4'] as const,
+      ['두께', 'peelThicknessX4'] as const,
+      ['비파괴당도', 'nonDestructiveValue'] as const,
       ['처리구', 'treatment'] as const,
     ].sort((a, b) => b[0].length - a[0].length)
 
@@ -400,12 +422,19 @@ function App() {
       return
     }
 
-    const record = createRecordFromDraft({
+    const baseRecord = createRecordFromDraft({
       setup,
       draft,
       sessionId: session.id,
       existingRecord: currentRecord,
     })
+    const record: SurveyRecord = {
+      ...baseRecord,
+      sync: {
+        ...baseRecord.sync,
+        state: online ? 'queued' : 'local-only',
+      },
+    }
 
     await upsertRecord(record)
     const nextRecords = [record, ...records.filter((item) => item.id !== record.id)].sort((a, b) =>
@@ -424,7 +453,9 @@ function App() {
     setSaveMessage(
       record.validation.missingRequired.length > 0
         ? `로컬 저장 완료. 누락 항목: ${record.validation.missingRequired.join(', ')}`
-        : '로컬 저장 완료. 같은 개체에 항목을 계속 추가할 수 있습니다.',
+        : online
+          ? '로컬 저장 후 동기화 대기열에 올렸습니다.'
+          : '오프라인 로컬 저장 완료. 네트워크 복구 후 큐에 올릴 수 있습니다.',
     )
     speak('저장 완료')
   }
@@ -462,6 +493,81 @@ function App() {
     })
     setActiveTab('capture')
     setSaveMessage('기존 로컬 기록을 다시 열었습니다.')
+  }
+
+  async function updateRecordSyncState(
+    recordId: string,
+    nextState: SurveyRecord['sync']['state'],
+    lastError?: string,
+  ) {
+    const target = records.find((record) => record.id === recordId)
+    if (!target) {
+      return
+    }
+
+    const updated: SurveyRecord = {
+      ...target,
+      sync: {
+        ...target.sync,
+        state: nextState,
+        lastError,
+      },
+      audit: {
+        ...target.audit,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+
+    await upsertRecord(updated)
+    setRecords((current) =>
+      current
+        .map((record) => (record.id === updated.id ? updated : record))
+        .sort((a, b) => b.audit.updatedAt.localeCompare(a.audit.updatedAt)),
+    )
+  }
+
+  async function queuePendingRecords() {
+    const candidates = records.filter(
+      (record) => record.sync.state === 'local-only' || record.sync.state === 'error',
+    )
+
+    await Promise.all(
+      candidates.map((record) => updateRecordSyncState(record.id, 'queued')),
+    )
+
+    setSaveMessage(
+      candidates.length > 0
+        ? `${candidates.length}건을 동기화 대기열로 이동했습니다.`
+        : '대기열로 올릴 로컬 기록이 없습니다.',
+    )
+  }
+
+  async function exportQueueSnapshot() {
+    const exportRecords = records.filter((record) => record.sync.state !== 'synced')
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      count: exportRecords.length,
+      records: exportRecords,
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `citrus-sync-queue-${new Date().toISOString().slice(0, 19)}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setSaveMessage(`${exportRecords.length}건의 미동기화 기록을 JSON으로 내보냈습니다.`)
+  }
+
+  function syncStateLabel(state: SurveyRecord['sync']['state']) {
+    if (state === 'queued') return '동기화 대기'
+    if (state === 'synced') return '동기화 완료'
+    if (state === 'syncing') return '동기화 중'
+    if (state === 'error') return '동기화 오류'
+    return '로컬 전용'
   }
 
   async function handleInstall() {
@@ -927,24 +1033,51 @@ function App() {
               {activeMeasurementFields
                 .filter((field) => field.inputType === 'derived')
                 .map((field) => {
-                  const preview = createRecordFromDraft({
-                    setup,
-                    draft,
-                    sessionId: session?.id ?? 'preview',
-                    existingRecord: currentRecord,
-                  })
                   return (
                     <div className="derived-card" key={field.id}>
                       <span>{field.label}</span>
                       <strong>
-                        {preview.derived[field.id]?.value === null ||
-                        preview.derived[field.id]?.value === undefined
+                        {previewRecord.derived[field.id]?.value === null ||
+                        previewRecord.derived[field.id]?.value === undefined
                           ? '-'
-                          : String(preview.derived[field.id]?.value)}
+                          : String(previewRecord.derived[field.id]?.value)}
                       </strong>
                     </div>
                   )
                 })}
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="panel-head">
+              <h2>입력 검증</h2>
+              <p>저장 전에 필수값 누락과 숫자 형식 문제를 바로 확인합니다.</p>
+            </div>
+            <div className="validation-stack">
+              <div className="validation-box">
+                <strong>필수값 누락</strong>
+                {validationPreview.missingRequired.length > 0 ? (
+                  <ul className="inline-list">
+                    {validationPreview.missingRequired.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="small-note">현재 누락된 필수값이 없습니다.</p>
+                )}
+              </div>
+              <div className="validation-box">
+                <strong>경고</strong>
+                {previewRecord.validation.warnings.length > 0 ? (
+                  <ul className="inline-list">
+                    {previewRecord.validation.warnings.map((warning) => (
+                      <li key={`${warning.fieldId}-${warning.code}`}>{warning.message}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="small-note">형식 및 기본 범위 경고가 없습니다.</p>
+                )}
+              </div>
             </div>
           </article>
 
@@ -970,11 +1103,7 @@ function App() {
                         ? describeMeasurement(
                             field.id,
                             currentRecord?.measurements ?? {},
-                            createRecordFromDraft({
-                              setup,
-                              draft,
-                              sessionId: session?.id ?? 'preview',
-                            }).derived,
+                            previewRecord.derived,
                           )
                         : draft.measurements[field.id]?.raw || '-'}
                     </span>
@@ -1001,6 +1130,35 @@ function App() {
         <section className="panel-grid">
           <article className="panel">
             <div className="panel-head">
+              <h2>동기화 큐</h2>
+              <p>서버 API 전 단계로, 로컬 큐 상태와 내보내기 흐름을 먼저 검증합니다.</p>
+            </div>
+            <div className="sync-summary-grid">
+              <div className="derived-card">
+                <span>동기화 대기</span>
+                <strong>{queuedCount}</strong>
+              </div>
+              <div className="derived-card">
+                <span>로컬 전용</span>
+                <strong>{localOnlyCount}</strong>
+              </div>
+              <div className="derived-card">
+                <span>오류</span>
+                <strong>{errorCount}</strong>
+              </div>
+            </div>
+            <div className="action-panel">
+              <button className="secondary-button" onClick={() => void queuePendingRecords()}>
+                로컬 기록 큐에 올리기
+              </button>
+              <button className="secondary-button" onClick={() => void exportQueueSnapshot()}>
+                큐 JSON 내보내기
+              </button>
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="panel-head">
               <h2>로컬 기록</h2>
               <p>저장된 기록은 오프라인 상태에서도 다시 열 수 있습니다.</p>
             </div>
@@ -1019,6 +1177,7 @@ function App() {
                       <p>
                         {record.common.farmName} · {record.common.label} · {record.common.treatment}
                       </p>
+                      <p className="small-note">{syncStateLabel(record.sync.state)}</p>
                     </div>
                     <div className="record-meta">
                       <span>
@@ -1030,6 +1189,36 @@ function App() {
                 ))
               )}
             </div>
+            {records.length > 0 ? (
+              <div className="record-actions-list">
+                {records
+                  .filter((record) => record.sync.state !== 'synced')
+                  .slice(0, 6)
+                  .map((record) => (
+                    <div className="record-action-row" key={`${record.id}-actions`}>
+                      <span>
+                        {record.common.farmName} / 나무 {record.common.treeNo} / 과실 {record.common.fruitNo}
+                      </span>
+                      <div className="inline-action-buttons">
+                        {record.sync.state !== 'queued' ? (
+                          <button
+                            className="secondary-button small-button"
+                            onClick={() => void updateRecordSyncState(record.id, 'queued')}
+                          >
+                            큐로 이동
+                          </button>
+                        ) : null}
+                        <button
+                          className="secondary-button small-button"
+                          onClick={() => void updateRecordSyncState(record.id, 'synced')}
+                        >
+                          동기화 완료 표시
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
           </article>
         </section>
       ) : null}
