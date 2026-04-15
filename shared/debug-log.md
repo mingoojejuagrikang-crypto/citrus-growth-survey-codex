@@ -38,3 +38,9 @@ Use this file to avoid repeating the same problem.
 - Root cause: The available `vite-plugin-pwa` release in npm does not yet declare compatibility with the scaffolded Vite 8 toolchain.
 - Fix/workaround: Avoid forcing an incompatible plugin. Implement the MVP PWA layer with a manual `manifest.webmanifest`, service worker, and explicit registration so the app remains installable and offline-capable without dependency mismatch risk.
 - Status: resolved
+
+## 2026-04-15 | pm
+- Symptom: Initial GitHub push was rejected after repository creation.
+- Root cause: The authenticated GitHub token has `repo` scope but not `workflow` scope, so GitHub refused pushes that create `.github/workflows/*`.
+- Fix/workaround: Remove workflow-based Pages deployment from the pushed commit and publish the built app through a `gh-pages` branch with Pages configured directly from the branch source.
+- Status: resolved
